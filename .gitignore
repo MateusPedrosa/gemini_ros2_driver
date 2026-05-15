@@ -1,0 +1,13 @@
+# Ignore the Tritech SDK folders and scripts
+GeminiSDK*/
+Tritech-USB-Serial.sh
+InstallSDK.sh
+
+# Ignore recorded log files
+*.glf
+*.ecd
+
+# Ignore ROS 2 compilation folders
+build/
+install/
+log/
