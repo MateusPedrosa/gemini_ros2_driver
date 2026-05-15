@@ -61,7 +61,11 @@ GeminiSonarNode::GeminiSonarNode() : Node("gemini_sonar_node") {
         std::bind(&GeminiSonarNode::parametersCallback, this, std::placeholders::_1));
 
     // Bind the callback to this specific class instance
-    SequencerApi::StartSvs5(std::bind(&GeminiSonarNode::onGeminiMessageReceived, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+    Svs5ErrorCode svs5_err = SequencerApi::StartSvs5(std::bind(&GeminiSonarNode::onGeminiMessageReceived, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+    if (svs5_err != SVS5_SEQUENCER_STATUS_OK) {
+        RCLCPP_FATAL(this->get_logger(), "StartSvs5 failed with error code %lu", svs5_err);
+        throw std::runtime_error("StartSvs5 failed");
+    }
 
     // Retrieve the parameters
     bool is_live = this->get_parameter("live_mode").as_bool();
@@ -154,6 +158,7 @@ void GeminiSonarNode::onGeminiMessageReceived(unsigned int msgType, size_t size,
         {
             const GLF::GeminiSonarStatusMessage* const statusMsg =
                 (const GLF::GeminiSonarStatusMessage* const)value;
+            if (!statusMsg) break;
             const GLF::GeminiStatusRecord& status = statusMsg->m_geminiSonarStatus;
 
             gemini_ros2::msg::SonarStatus status_msg;
@@ -187,9 +192,11 @@ void GeminiSonarNode::onGeminiMessageReceived(unsigned int msgType, size_t size,
         case SequencerApi::COMPASS_RECORD:
         {
             GLF::GLogV4ReplyMessage* gnsV4ReplyMsg = (GLF::GLogV4ReplyMessage*)value;
+            if (!gnsV4ReplyMsg) break;
             uint8_t dataType = gnsV4ReplyMsg->m_header.m_ciHeader.m_dataType;
             if (dataType == 99)
             {
+                if (!gnsV4ReplyMsg->m_v4GenericRec.m_vecData) break;
                 std::vector<unsigned char>& vecCompass = *gnsV4ReplyMsg->m_v4GenericRec.m_vecData;
                 publishImu(reinterpret_cast<const GLF::CompassDataRecord*>(vecCompass.data()));
             }
@@ -202,6 +209,7 @@ void GeminiSonarNode::onGeminiMessageReceived(unsigned int msgType, size_t size,
 
         case SequencerApi::AHRS_HPR_DATA:
         {
+            if (!value) break;
             publishImu(reinterpret_cast<const GLF::CompassDataRecord*>(value));
         }
         break;
@@ -209,7 +217,9 @@ void GeminiSonarNode::onGeminiMessageReceived(unsigned int msgType, size_t size,
         case SequencerApi::GPS_RECORD:
         {
             GLF::GLogV4ReplyMessage* gnsV4ReplyMsg = (GLF::GLogV4ReplyMessage*)value;
+            if (!gnsV4ReplyMsg) break;
             if (gnsV4ReplyMsg->m_header.m_ciHeader.m_dataType != 99) break;
+            if (!gnsV4ReplyMsg->m_v4GenericRec.m_vecData) break;
             std::vector<unsigned char>& vec = *gnsV4ReplyMsg->m_v4GenericRec.m_vecData;
             GLF::GpsDataRecord* pGps = (GLF::GpsDataRecord*)vec.data();
 
@@ -231,6 +241,7 @@ void GeminiSonarNode::onGeminiMessageReceived(unsigned int msgType, size_t size,
         case SequencerApi::AHRS_RAW_DATA:
         {
             const auto* pRaw = reinterpret_cast<const GLF::AHRSRawDataRecord*>(value);
+            if (!pRaw) break;
 
             auto imu_msg = sensor_msgs::msg::Imu();
             imu_msg.header.stamp    = this->now();
@@ -260,6 +271,7 @@ void GeminiSonarNode::onGeminiMessageReceived(unsigned int msgType, size_t size,
 }
 
 void GeminiSonarNode::publishImu(const GLF::CompassDataRecord* pRec) {
+    if (!pRec) return;
     RCLCPP_INFO_ONCE(this->get_logger(), "Publishing IMU data (heading=%.2f pitch=%.2f roll=%.2f)", pRec->m_heading, pRec->m_pitch, pRec->m_roll);
     auto imu_msg = sensor_msgs::msg::Imu();
     imu_msg.header.stamp = this->now();
@@ -399,7 +411,7 @@ rcl_interfaces::msg::SetParametersResult GeminiSonarNode::parametersCallback(con
             q.m_screenPixels = 2048;
             SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_CPU_PERFORMANCE,
                 sizeof(SequencerApi::SonarImageQualityLevel), &q, 0);
-            RCLCPP_INFO(this->get_logger(), "Live Update: Image Quality -> %d", param.as_int());
+            RCLCPP_INFO(this->get_logger(), "Live Update: Image Quality -> %ld", param.as_int());
         }
         else if (param.get_name() == "loop_playback") {
             bool loop = param.as_bool();
