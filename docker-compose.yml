@@ -34,4 +34,4 @@ services:
       - CYCLONEDDS_URI=<CycloneDDS><Domain><General><NetworkInterfaceAddress>lo</NetworkInterfaceAddress></General></Domain></CycloneDDS>
     depends_on:
       - gemini_dev
-    command: /bin/bash -c "source /opt/ros/jazzy/setup.bash && source /workspace/build/ros2_ws/install/setup.bash && ros2 run foxglove_bridge foxglove_bridge"
+    command: /bin/bash -c "source /opt/ros/jazzy/setup.bash && source /workspace/build/install/setup.bash && ros2 run foxglove_bridge foxglove_bridge"

@@ -16,7 +16,7 @@ RUN chmod +x InstallSDK.sh && ./InstallSDK.sh && ldconfig
 
 # 3. Configure the ROS 2 environment variables permanently
 RUN echo "source /opt/ros/jazzy/setup.bash" >> ~/.bashrc && \
-    echo "source /workspace/build/ros2_ws/install/setup.bash" >> ~/.bashrc
+    echo "source /workspace/build/install/setup.bash" >> ~/.bashrc
 
 # 4. Set the default directory when you enter the container
 WORKDIR /workspace/build
