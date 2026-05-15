@@ -17,12 +17,12 @@ using std::placeholders::_3;
 
 GeminiSonarNode::GeminiSonarNode() : Node("gemini_sonar_node") {
     // Initialize your publishers
-    image_pub_   = this->create_publisher<sensor_msgs::msg::Image>("sonar/image", 10);
-    status_pub_  = this->create_publisher<gemini_ros2::msg::SonarStatus>("sonar/status", 10);
-    imu_pub_     = this->create_publisher<sensor_msgs::msg::Imu>("sonar/imu", 10);
-    imu_raw_pub_ = this->create_publisher<sensor_msgs::msg::Imu>("sonar/imu_raw", 10);
-    mag_pub_     = this->create_publisher<sensor_msgs::msg::MagneticField>("sonar/mag", 10);
-    gps_pub_     = this->create_publisher<sensor_msgs::msg::NavSatFix>("sonar/gps", 10);
+    image_pub_   = this->create_publisher<sensor_msgs::msg::Image>("sonar/image", rclcpp::SensorDataQoS());
+    status_pub_  = this->create_publisher<gemini_ros2::msg::SonarStatus>("sonar/status", rclcpp::SensorDataQoS());
+    imu_pub_     = this->create_publisher<sensor_msgs::msg::Imu>("sonar/imu", rclcpp::SensorDataQoS());
+    imu_raw_pub_ = this->create_publisher<sensor_msgs::msg::Imu>("sonar/imu_raw", rclcpp::SensorDataQoS());
+    mag_pub_     = this->create_publisher<sensor_msgs::msg::MagneticField>("sonar/mag", rclcpp::SensorDataQoS());
+    gps_pub_     = this->create_publisher<sensor_msgs::msg::NavSatFix>("sonar/gps", rclcpp::SensorDataQoS());
 
     // Services
     play_pause_srv_ = this->create_service<std_srvs::srv::SetBool>(
