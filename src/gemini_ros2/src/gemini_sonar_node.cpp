@@ -322,20 +322,63 @@ rcl_interfaces::msg::SetParametersResult GeminiSonarNode::parametersCallback(con
     result.successful = true;
     result.reason = "Parameters applied successfully";
 
-    // Pre-scan for paired parameters. The callback fires before ROS 2 commits the new
-    // values, so get_parameter() returns stale data for the sibling of a pair. Caching
-    // new values here ensures both members of a pair use their updated values even when
-    // they arrive in the same batch.
+    // Pre-scan: cache paired values AND validate every parameter before touching the SDK.
+    // Doing this upfront ensures no SDK calls fire if any value in the batch is out of range.
     std::optional<int>    new_freq_mode;
     std::optional<double> new_range_thresh;
     std::optional<bool>   new_use_manual_sos;
     std::optional<double> new_manual_sos;
+
+    auto reject = [&](const std::string& reason) {
+        result.successful = false;
+        result.reason = reason;
+    };
+
     for (const auto& p : parameters) {
-        if      (p.get_name() == "frequency_mode")  new_freq_mode      = p.as_int();
-        else if (p.get_name() == "range_threshold") new_range_thresh   = p.as_double();
-        else if (p.get_name() == "use_manual_sos")  new_use_manual_sos = p.as_bool();
-        else if (p.get_name() == "manual_sos")      new_manual_sos     = p.as_double();
+        const auto& name = p.get_name();
+        if (name == "range") {
+            double v = p.as_double();
+            if (v < 1.0 || v > 120.0) { reject("range must be 1.0–120.0 m"); return result; }
+        } else if (name == "gain") {
+            int v = p.as_int();
+            if (v < 1 || v > 100)     { reject("gain must be 1–100");         return result; }
+        } else if (name == "ping_mode") {
+            int v = p.as_int();
+            if (v < 0 || v > 3)       { reject("ping_mode must be 0–3");      return result; }
+        } else if (name == "chirp_mode") {
+            int v = p.as_int();
+            if (v < 0 || v > 2)       { reject("chirp_mode must be 0–2");     return result; }
+        } else if (name == "frequency_mode") {
+            int v = p.as_int();
+            if (v < 0 || v > 3)       { reject("frequency_mode must be 0–3"); return result; }
+            new_freq_mode = v;
+        } else if (name == "range_threshold") {
+            double v = p.as_double();
+            if (v < 1.0 || v > 50.0)  { reject("range_threshold must be 1.0–50.0 m"); return result; }
+            new_range_thresh = v;
+        } else if (name == "manual_sos") {
+            double v = p.as_double();
+            if (v < 1000.0 || v > 2000.0) { reject("manual_sos must be 1000.0–2000.0 m/s"); return result; }
+            new_manual_sos = v;
+        } else if (name == "use_manual_sos") {
+            new_use_manual_sos = p.as_bool();
+        } else if (name == "aperture") {
+            double v = p.as_double();
+            if (v != 120.0 && v != 65.0) { reject("aperture must be 120.0 or 65.0 degrees"); return result; }
+        } else if (name == "image_quality") {
+            int v = p.as_int();
+            if (v < 0 || v > 3)       { reject("image_quality must be 0–3");  return result; }
+        } else if (name == "playback_speed") {
+            int v = p.as_int();
+            if (v < 0 || v > 1)       { reject("playback_speed must be 0 (free-run) or 1 (real-time)"); return result; }
+        }
     }
+
+    // Logs a warning if the SDK rejects a configuration call.
+    auto sdk_set = [this](Svs5ErrorCode err, const char* label) {
+        if (err != SVS5_SEQUENCER_STATUS_OK)
+            RCLCPP_WARN(this->get_logger(), "SDK rejected %s (error %lu)", label, err);
+    };
 
     bool freq_applied = false;
     bool sos_applied  = false;
@@ -343,23 +386,23 @@ rcl_interfaces::msg::SetParametersResult GeminiSonarNode::parametersCallback(con
     for (const auto &param : parameters) {
         if (param.get_name() == "range") {
             double range = param.as_double();
-            SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_RANGE, sizeof(double), &range, 0);
+            sdk_set(SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_RANGE, sizeof(double), &range, 0), "range");
             RCLCPP_INFO(this->get_logger(), "Live Update: Range -> %.2f m", range);
         }
         else if (param.get_name() == "gain") {
             int gain = param.as_int();
-            SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_GAIN, sizeof(int), &gain, 0);
+            sdk_set(SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_GAIN, sizeof(int), &gain, 0), "gain");
             RCLCPP_INFO(this->get_logger(), "Live Update: Gain -> %d%%", gain);
         }
         else if (param.get_name() == "high_resolution") {
             bool high_res = param.as_bool();
-            SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_HIGH_RESOLUTION, sizeof(bool), &high_res, 0);
+            sdk_set(SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_HIGH_RESOLUTION, sizeof(bool), &high_res, 0), "high_resolution");
             RCLCPP_INFO(this->get_logger(), "Live Update: High Resolution -> %s", high_res ? "Enabled" : "Disabled");
         }
         else if (param.get_name() == "chirp_mode") {
             CHIRP_MODE chirp = static_cast<CHIRP_MODE>(param.as_int());
-            SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_CHIRP_MODE, sizeof(CHIRP_MODE), &chirp, 0);
-            RCLCPP_INFO(this->get_logger(), "Live Update: Chirp Mode Configured");
+            sdk_set(SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_CHIRP_MODE, sizeof(CHIRP_MODE), &chirp, 0), "chirp_mode");
+            RCLCPP_INFO(this->get_logger(), "Live Update: Chirp Mode -> %ld", param.as_int());
         }
         else if (param.get_name() == "frequency_mode" || param.get_name() == "range_threshold") {
             if (freq_applied) continue;
@@ -369,7 +412,7 @@ rcl_interfaces::msg::SetParametersResult GeminiSonarNode::parametersCallback(con
             freq_config.m_frequency      = static_cast<FREQUENCY>(new_freq_mode.value_or(this->get_parameter("frequency_mode").as_int()));
             freq_config.m_rangeThreshold = new_range_thresh.value_or(this->get_parameter("range_threshold").as_double());
 
-            SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_RANGE_RESOLUTION, sizeof(RangeFrequencyConfig), &freq_config, 0);
+            sdk_set(SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_RANGE_RESOLUTION, sizeof(RangeFrequencyConfig), &freq_config, 0), "frequency_mode/range_threshold");
             RCLCPP_INFO(this->get_logger(), "Live Update: 1200iK Frequency Mode Configured");
         }
         else if (param.get_name() == "ping_mode") {
@@ -381,8 +424,8 @@ rcl_interfaces::msg::SetParametersResult GeminiSonarNode::parametersCallback(con
             ping_config.m_manualTrigger = (p_mode == 3);
             if (p_mode == 1) ping_config.m_msInterval = 100;
 
-            SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_PING_MODE, sizeof(SequencerApi::SequencerPingMode), &ping_config, 0);
-            RCLCPP_INFO(this->get_logger(), "Live Update: Ping Mode Configured");
+            sdk_set(SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_PING_MODE, sizeof(SequencerApi::SequencerPingMode), &ping_config, 0), "ping_mode");
+            RCLCPP_INFO(this->get_logger(), "Live Update: Ping Mode -> %d", p_mode);
         }
         else if (param.get_name() == "use_manual_sos" || param.get_name() == "manual_sos") {
             if (sos_applied) continue;
@@ -392,38 +435,38 @@ rcl_interfaces::msg::SetParametersResult GeminiSonarNode::parametersCallback(con
             sos_config.m_bUsedUserSos = new_use_manual_sos.value_or(this->get_parameter("use_manual_sos").as_bool());
             sos_config.m_manualSos    = static_cast<float>(new_manual_sos.value_or(this->get_parameter("manual_sos").as_double()));
 
-            SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_SOUND_VELOCITY, sizeof(SequencerApi::SequencerSosConfig), &sos_config, 0);
+            sdk_set(SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_SOUND_VELOCITY, sizeof(SequencerApi::SequencerSosConfig), &sos_config, 0), "manual_sos");
             RCLCPP_INFO(this->get_logger(), "Live Update: Speed of Sound Configured");
         }
         else if (param.get_name() == "sonar_inverted") {
             auto orient = param.as_bool()
                 ? SequencerApi::SONAR_ORIENTATION_DOWN
                 : SequencerApi::SONAR_ORIENTATION_UP;
-            SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_SONAR_ORIENTATION,
-                sizeof(SequencerApi::ESvs5SonarOrientation), &orient, 0);
+            sdk_set(SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_SONAR_ORIENTATION,
+                sizeof(SequencerApi::ESvs5SonarOrientation), &orient, 0), "sonar_inverted");
             RCLCPP_INFO(this->get_logger(), "Live Update: Sonar Orientation -> %s", param.as_bool() ? "Inverted" : "Upright");
         }
         else if (param.get_name() == "aperture") {
             double ap = param.as_double();
-            SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_APERTURE, sizeof(double), &ap, 0);
+            sdk_set(SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_APERTURE, sizeof(double), &ap, 0), "aperture");
             RCLCPP_INFO(this->get_logger(), "Live Update: Aperture -> %.0f deg", ap);
         }
         else if (param.get_name() == "image_quality") {
             SequencerApi::SonarImageQualityLevel q;
             q.m_performance  = static_cast<SequencerApi::ESdkPerformanceControl>(param.as_int());
             q.m_screenPixels = 2048;
-            SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_CPU_PERFORMANCE,
-                sizeof(SequencerApi::SonarImageQualityLevel), &q, 0);
+            sdk_set(SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_CPU_PERFORMANCE,
+                sizeof(SequencerApi::SonarImageQualityLevel), &q, 0), "image_quality");
             RCLCPP_INFO(this->get_logger(), "Live Update: Image Quality -> %ld", param.as_int());
         }
         else if (param.get_name() == "loop_playback") {
             bool loop = param.as_bool();
-            SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_PLAY_REPEAT, sizeof(bool), &loop, 0);
+            sdk_set(SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_PLAY_REPEAT, sizeof(bool), &loop, 0), "loop_playback");
             RCLCPP_INFO(this->get_logger(), "Live Update: Loop Playback -> %s", loop ? "Enabled" : "Disabled");
         }
         else if (param.get_name() == "playback_speed") {
             int speed = param.as_int();
-            SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_PLAY_SPEED, sizeof(int), &speed, 0);
+            sdk_set(SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_PLAY_SPEED, sizeof(int), &speed, 0), "playback_speed");
             RCLCPP_INFO(this->get_logger(), "Live Update: Playback Speed -> %s", speed == 0 ? "Free-run" : "Real-time");
         }
     }
