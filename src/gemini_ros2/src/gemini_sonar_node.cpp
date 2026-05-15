@@ -4,6 +4,7 @@
 #include "Gemini/GeminiStructuresPublic.h"
 #include "GenesisSerializer/GlfApi.h"
 #include "GenesisSerializer/GenericDataTypes.h"
+#include "GenesisSerializer/GpsRecord.h"
 
 #include <optional>
 #include <vector>
@@ -16,9 +17,23 @@ using std::placeholders::_3;
 
 GeminiSonarNode::GeminiSonarNode() : Node("gemini_sonar_node") {
     // Initialize your publishers
-    image_pub_ = this->create_publisher<sensor_msgs::msg::Image>("sonar/image", 10);
-    status_pub_ = this->create_publisher<gemini_ros2::msg::SonarStatus>("sonar/status", 10);
-    imu_pub_ = this->create_publisher<sensor_msgs::msg::Imu>("sonar/imu", 10);
+    image_pub_   = this->create_publisher<sensor_msgs::msg::Image>("sonar/image", 10);
+    status_pub_  = this->create_publisher<gemini_ros2::msg::SonarStatus>("sonar/status", 10);
+    imu_pub_     = this->create_publisher<sensor_msgs::msg::Imu>("sonar/imu", 10);
+    imu_raw_pub_ = this->create_publisher<sensor_msgs::msg::Imu>("sonar/imu_raw", 10);
+    mag_pub_     = this->create_publisher<sensor_msgs::msg::MagneticField>("sonar/mag", 10);
+    gps_pub_     = this->create_publisher<sensor_msgs::msg::NavSatFix>("sonar/gps", 10);
+
+    // Services
+    play_pause_srv_ = this->create_service<std_srvs::srv::SetBool>(
+        "sonar/playback/pause",
+        std::bind(&GeminiSonarNode::playbackPauseCallback, this, std::placeholders::_1, std::placeholders::_2));
+    play_stop_srv_ = this->create_service<std_srvs::srv::Trigger>(
+        "sonar/playback/stop",
+        std::bind(&GeminiSonarNode::playbackStopCallback, this, std::placeholders::_1, std::placeholders::_2));
+    record_srv_ = this->create_service<std_srvs::srv::SetBool>(
+        "sonar/record",
+        std::bind(&GeminiSonarNode::recordCallback, this, std::placeholders::_1, std::placeholders::_2));
 
     // Declare ROS 2 parameters for environment toggling
     this->declare_parameter<bool>("live_mode", false);
@@ -34,6 +49,12 @@ GeminiSonarNode::GeminiSonarNode() : Node("gemini_sonar_node") {
     this->declare_parameter<int>("chirp_mode", 2);
     this->declare_parameter<bool>("use_manual_sos", false);
     this->declare_parameter<double>("manual_sos", 1500.0);
+    this->declare_parameter<bool>("sonar_inverted", false);
+    this->declare_parameter<double>("aperture", 120.0);
+    this->declare_parameter<int>("image_quality", 3);
+    this->declare_parameter<bool>("loop_playback", false);
+    this->declare_parameter<int>("playback_speed", 1);
+    this->declare_parameter<std::string>("record_path", "");
 
     // Bind the live parameter listener
     param_callback_handle_ = this->add_on_set_parameters_callback(
@@ -71,6 +92,12 @@ GeminiSonarNode::GeminiSonarNode() : Node("gemini_sonar_node") {
             0
         );
         RCLCPP_INFO(this->get_logger(), "Gemini ROS 2 Node Started. Playing back log file: %s", log_path.c_str());
+    }
+
+    std::string record_path = this->get_parameter("record_path").as_string();
+    if (!record_path.empty()) {
+        SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_FILE_LOCATION,
+            record_path.size() + 1, record_path.c_str(), 0);
     }
 
     applyInitialConfigurations();
@@ -178,7 +205,54 @@ void GeminiSonarNode::onGeminiMessageReceived(unsigned int msgType, size_t size,
             publishImu(reinterpret_cast<const GLF::CompassDataRecord*>(value));
         }
         break;
-        
+
+        case SequencerApi::GPS_RECORD:
+        {
+            GLF::GLogV4ReplyMessage* gnsV4ReplyMsg = (GLF::GLogV4ReplyMessage*)value;
+            if (gnsV4ReplyMsg->m_header.m_ciHeader.m_dataType != 99) break;
+            std::vector<unsigned char>& vec = *gnsV4ReplyMsg->m_v4GenericRec.m_vecData;
+            GLF::GpsDataRecord* pGps = (GLF::GpsDataRecord*)vec.data();
+
+            auto gps_msg = sensor_msgs::msg::NavSatFix();
+            gps_msg.header.stamp    = this->now();
+            gps_msg.header.frame_id = "sonar_link";
+            // bits 1 (lat valid) and 2 (lon valid) of m_gpsValid indicate a position fix
+            gps_msg.status.status   = ((pGps->m_gpsValid & 0x06) == 0x06)
+                                        ? sensor_msgs::msg::NavSatStatus::STATUS_FIX
+                                        : sensor_msgs::msg::NavSatStatus::STATUS_NO_FIX;
+            gps_msg.latitude        = pGps->m_llRec.m_latDegrees;
+            gps_msg.longitude       = pGps->m_llRec.m_longDegrees;
+            gps_msg.altitude        = pGps->m_llRec.m_altitude;
+            gps_msg.position_covariance_type = sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_UNKNOWN;
+            gps_pub_->publish(gps_msg);
+        }
+        break;
+
+        case SequencerApi::AHRS_RAW_DATA:
+        {
+            const auto* pRaw = reinterpret_cast<const GLF::AHRSRawDataRecord*>(value);
+
+            auto imu_msg = sensor_msgs::msg::Imu();
+            imu_msg.header.stamp    = this->now();
+            imu_msg.header.frame_id = "sonar_link";
+            imu_msg.angular_velocity.x    = pRaw->m_gyroX;
+            imu_msg.angular_velocity.y    = pRaw->m_gyroY;
+            imu_msg.angular_velocity.z    = pRaw->m_gyroZ;
+            imu_msg.linear_acceleration.x = pRaw->m_accelX;
+            imu_msg.linear_acceleration.y = pRaw->m_accelY;
+            imu_msg.linear_acceleration.z = pRaw->m_accelZ;
+            imu_msg.orientation_covariance[0] = -1.0; // orientation not available in raw data
+            imu_raw_pub_->publish(imu_msg);
+
+            auto mag_msg = sensor_msgs::msg::MagneticField();
+            mag_msg.header       = imu_msg.header;
+            mag_msg.magnetic_field.x = pRaw->m_magX; // SDK units: normalised, not Tesla
+            mag_msg.magnetic_field.y = pRaw->m_magY;
+            mag_msg.magnetic_field.z = pRaw->m_magZ;
+            mag_pub_->publish(mag_msg);
+        }
+        break;
+
         default:
             // Handle other messages if necessary
             break;
@@ -218,7 +292,12 @@ void GeminiSonarNode::applyInitialConfigurations() {
     initial_params.push_back(this->get_parameter("chirp_mode"));
     initial_params.push_back(this->get_parameter("use_manual_sos"));
     initial_params.push_back(this->get_parameter("manual_sos"));
-    
+    initial_params.push_back(this->get_parameter("sonar_inverted"));
+    initial_params.push_back(this->get_parameter("aperture"));
+    initial_params.push_back(this->get_parameter("image_quality"));
+    initial_params.push_back(this->get_parameter("loop_playback"));
+    initial_params.push_back(this->get_parameter("playback_speed"));
+
     parametersCallback(initial_params);
 }
 
@@ -301,8 +380,68 @@ rcl_interfaces::msg::SetParametersResult GeminiSonarNode::parametersCallback(con
             SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_SOUND_VELOCITY, sizeof(SequencerApi::SequencerSosConfig), &sos_config, 0);
             RCLCPP_INFO(this->get_logger(), "Live Update: Speed of Sound Configured");
         }
+        else if (param.get_name() == "sonar_inverted") {
+            auto orient = param.as_bool()
+                ? SequencerApi::SONAR_ORIENTATION_DOWN
+                : SequencerApi::SONAR_ORIENTATION_UP;
+            SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_SONAR_ORIENTATION,
+                sizeof(SequencerApi::ESvs5SonarOrientation), &orient, 0);
+            RCLCPP_INFO(this->get_logger(), "Live Update: Sonar Orientation -> %s", param.as_bool() ? "Inverted" : "Upright");
+        }
+        else if (param.get_name() == "aperture") {
+            double ap = param.as_double();
+            SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_APERTURE, sizeof(double), &ap, 0);
+            RCLCPP_INFO(this->get_logger(), "Live Update: Aperture -> %.0f deg", ap);
+        }
+        else if (param.get_name() == "image_quality") {
+            SequencerApi::SonarImageQualityLevel q;
+            q.m_performance  = static_cast<SequencerApi::ESdkPerformanceControl>(param.as_int());
+            q.m_screenPixels = 2048;
+            SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_CPU_PERFORMANCE,
+                sizeof(SequencerApi::SonarImageQualityLevel), &q, 0);
+            RCLCPP_INFO(this->get_logger(), "Live Update: Image Quality -> %d", param.as_int());
+        }
+        else if (param.get_name() == "loop_playback") {
+            bool loop = param.as_bool();
+            SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_PLAY_REPEAT, sizeof(bool), &loop, 0);
+            RCLCPP_INFO(this->get_logger(), "Live Update: Loop Playback -> %s", loop ? "Enabled" : "Disabled");
+        }
+        else if (param.get_name() == "playback_speed") {
+            int speed = param.as_int();
+            SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_PLAY_SPEED, sizeof(int), &speed, 0);
+            RCLCPP_INFO(this->get_logger(), "Live Update: Playback Speed -> %s", speed == 0 ? "Free-run" : "Real-time");
+        }
     }
     return result;
+}
+
+void GeminiSonarNode::playbackPauseCallback(
+    const std_srvs::srv::SetBool::Request::SharedPtr req,
+    std_srvs::srv::SetBool::Response::SharedPtr res)
+{
+    bool pause = req->data;
+    SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_PLAY_PAUSE, sizeof(bool), &pause, 0);
+    res->success = true;
+    res->message = pause ? "Playback paused" : "Playback resumed";
+}
+
+void GeminiSonarNode::playbackStopCallback(
+    const std_srvs::srv::Trigger::Request::SharedPtr /*req*/,
+    std_srvs::srv::Trigger::Response::SharedPtr res)
+{
+    SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_PLAY_STOP, 0, nullptr, 0);
+    res->success = true;
+    res->message = "Playback stopped";
+}
+
+void GeminiSonarNode::recordCallback(
+    const std_srvs::srv::SetBool::Request::SharedPtr req,
+    std_srvs::srv::SetBool::Response::SharedPtr res)
+{
+    bool record = req->data;
+    SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_REC, sizeof(bool), &record, 0);
+    res->success = true;
+    res->message = record ? "Recording started" : "Recording stopped";
 }
 
 int main(int argc, char* argv[]) {

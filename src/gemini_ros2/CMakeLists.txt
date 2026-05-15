@@ -11,6 +11,7 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(tf2 REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -30,7 +31,7 @@ target_include_directories(gemini_sonar_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 
-ament_target_dependencies(gemini_sonar_node rclcpp sensor_msgs std_msgs tf2)
+ament_target_dependencies(gemini_sonar_node rclcpp sensor_msgs std_msgs std_srvs tf2)
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} rosidl_typesupport_cpp)
 
 # Link the Tritech ARM64 libraries and generated message interfaces
