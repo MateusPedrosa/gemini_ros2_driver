@@ -5,6 +5,7 @@
 #include "GenesisSerializer/GlfApi.h"
 #include "GenesisSerializer/GenericDataTypes.h"
 
+#include <optional>
 #include <vector>
 #include <string>
 #include <functional>
@@ -33,9 +34,6 @@ GeminiSonarNode::GeminiSonarNode() : Node("gemini_sonar_node") {
     this->declare_parameter<int>("chirp_mode", 2);
     this->declare_parameter<bool>("use_manual_sos", false);
     this->declare_parameter<double>("manual_sos", 1500.0);
-
-    // Push the initial parameter states from the launch file to the sonar
-    applyInitialConfigurations();
 
     // Bind the live parameter listener
     param_callback_handle_ = this->add_on_set_parameters_callback(
@@ -74,6 +72,8 @@ GeminiSonarNode::GeminiSonarNode() : Node("gemini_sonar_node") {
         );
         RCLCPP_INFO(this->get_logger(), "Gemini ROS 2 Node Started. Playing back log file: %s", log_path.c_str());
     }
+
+    applyInitialConfigurations();
 }
 
 GeminiSonarNode::~GeminiSonarNode() {
@@ -85,22 +85,41 @@ void GeminiSonarNode::onGeminiMessageReceived(unsigned int msgType, size_t size,
         case SequencerApi::TGT_IMG_PLAYBACK:
         {
             GLF::GenesisPlaybackTargetImage* playbackImg = (GLF::GenesisPlaybackTargetImage*)value;
+            if (!playbackImg || !playbackImg->m_pLogTgtImage) break;
+            const auto& mi = playbackImg->m_pLogTgtImage->m_mainImage;
+            if (!mi.m_uiEndBearing || !mi.m_uiEndRange || !mi.m_vecData || mi.m_vecData->empty()) break;
 
             auto img_msg = sensor_msgs::msg::Image();
-            img_msg.header.stamp = this->now();
+            img_msg.header.stamp    = this->now();
             img_msg.header.frame_id = "sonar_link";
-
-            img_msg.width = playbackImg->m_pLogTgtImage->m_mainImage.m_uiEndBearing;
-            img_msg.height = playbackImg->m_pLogTgtImage->m_mainImage.m_uiEndRange;
+            img_msg.width    = mi.m_uiEndBearing - mi.m_uiStartBearing;
+            img_msg.height   = mi.m_uiEndRange;
             img_msg.encoding = "mono8";
-            img_msg.step = img_msg.width;
-
-            auto& raw_data = playbackImg->m_pLogTgtImage->m_mainImage.m_vecData;
-            img_msg.data.assign(raw_data->begin(), raw_data->end());
+            img_msg.step     = img_msg.width;
+            img_msg.data.assign(mi.m_vecData->begin(), mi.m_vecData->end());
 
             image_pub_->publish(img_msg);
-
             RCLCPP_INFO(this->get_logger(), "Published playback frame %d", playbackImg->m_frame);
+        }
+        break;
+
+        case SequencerApi::GLF_LIVE_TARGET_IMAGE:
+        {
+            GLF::GLogTargetImage* liveImg = (GLF::GLogTargetImage*)value;
+            if (!liveImg) break;
+            const auto& mi = liveImg->m_mainImage;
+            if (!mi.m_uiEndBearing || !mi.m_uiEndRange || !mi.m_vecData || mi.m_vecData->empty()) break;
+
+            auto img_msg = sensor_msgs::msg::Image();
+            img_msg.header.stamp    = this->now();
+            img_msg.header.frame_id = "sonar_link";
+            img_msg.width    = mi.m_uiEndBearing - mi.m_uiStartBearing;
+            img_msg.height   = mi.m_uiEndRange;
+            img_msg.encoding = "mono8";
+            img_msg.step     = img_msg.width;
+            img_msg.data.assign(mi.m_vecData->begin(), mi.m_vecData->end());
+
+            image_pub_->publish(img_msg);
         }
         break;
 
@@ -209,58 +228,76 @@ rcl_interfaces::msg::SetParametersResult GeminiSonarNode::parametersCallback(con
     result.successful = true;
     result.reason = "Parameters applied successfully";
 
+    // Pre-scan for paired parameters. The callback fires before ROS 2 commits the new
+    // values, so get_parameter() returns stale data for the sibling of a pair. Caching
+    // new values here ensures both members of a pair use their updated values even when
+    // they arrive in the same batch.
+    std::optional<int>    new_freq_mode;
+    std::optional<double> new_range_thresh;
+    std::optional<bool>   new_use_manual_sos;
+    std::optional<double> new_manual_sos;
+    for (const auto& p : parameters) {
+        if      (p.get_name() == "frequency_mode")  new_freq_mode      = p.as_int();
+        else if (p.get_name() == "range_threshold") new_range_thresh   = p.as_double();
+        else if (p.get_name() == "use_manual_sos")  new_use_manual_sos = p.as_bool();
+        else if (p.get_name() == "manual_sos")      new_manual_sos     = p.as_double();
+    }
+
+    bool freq_applied = false;
+    bool sos_applied  = false;
+
     for (const auto &param : parameters) {
         if (param.get_name() == "range") {
             double range = param.as_double();
             SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_RANGE, sizeof(double), &range, 0);
             RCLCPP_INFO(this->get_logger(), "Live Update: Range -> %.2f m", range);
-        } 
+        }
         else if (param.get_name() == "gain") {
             int gain = param.as_int();
             SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_GAIN, sizeof(int), &gain, 0);
             RCLCPP_INFO(this->get_logger(), "Live Update: Gain -> %d%%", gain);
-        } 
+        }
         else if (param.get_name() == "high_resolution") {
             bool high_res = param.as_bool();
             SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_HIGH_RESOLUTION, sizeof(bool), &high_res, 0);
             RCLCPP_INFO(this->get_logger(), "Live Update: High Resolution -> %s", high_res ? "Enabled" : "Disabled");
-        } 
+        }
         else if (param.get_name() == "chirp_mode") {
             CHIRP_MODE chirp = static_cast<CHIRP_MODE>(param.as_int());
             SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_CHIRP_MODE, sizeof(CHIRP_MODE), &chirp, 0);
             RCLCPP_INFO(this->get_logger(), "Live Update: Chirp Mode Configured");
         }
         else if (param.get_name() == "frequency_mode" || param.get_name() == "range_threshold") {
+            if (freq_applied) continue;
+            freq_applied = true;
+
             RangeFrequencyConfig freq_config;
-            
-            // Read from the incoming update if present, otherwise fall back to the node's current state
-            int mode = (param.get_name() == "frequency_mode") ? param.as_int() : this->get_parameter("frequency_mode").as_int();
-            double thresh = (param.get_name() == "range_threshold") ? param.as_double() : this->get_parameter("range_threshold").as_double();
-            
-            freq_config.m_frequency = static_cast<FREQUENCY>(mode);
-            freq_config.m_rangeThreshold = thresh;
-            
+            freq_config.m_frequency      = static_cast<FREQUENCY>(new_freq_mode.value_or(this->get_parameter("frequency_mode").as_int()));
+            freq_config.m_rangeThreshold = new_range_thresh.value_or(this->get_parameter("range_threshold").as_double());
+
             SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_RANGE_RESOLUTION, sizeof(RangeFrequencyConfig), &freq_config, 0);
             RCLCPP_INFO(this->get_logger(), "Live Update: 1200iK Frequency Mode Configured");
         }
         else if (param.get_name() == "ping_mode") {
             SequencerApi::SequencerPingMode ping_config;
             int p_mode = param.as_int();
-            
-            ping_config.m_bFreeRun = (p_mode == 0);
+
+            ping_config.m_bFreeRun      = (p_mode == 0);
             ping_config.m_extTTLTrigger = (p_mode == 2);
             ping_config.m_manualTrigger = (p_mode == 3);
-            if (p_mode == 1) ping_config.m_msInterval = 100; // 100ms Fixed interval 
-            
+            if (p_mode == 1) ping_config.m_msInterval = 100;
+
             SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_PING_MODE, sizeof(SequencerApi::SequencerPingMode), &ping_config, 0);
             RCLCPP_INFO(this->get_logger(), "Live Update: Ping Mode Configured");
         }
         else if (param.get_name() == "use_manual_sos" || param.get_name() == "manual_sos") {
+            if (sos_applied) continue;
+            sos_applied = true;
+
             SequencerApi::SequencerSosConfig sos_config;
-            
-            sos_config.m_bUsedUserSos = (param.get_name() == "use_manual_sos") ? param.as_bool() : this->get_parameter("use_manual_sos").as_bool();
-            sos_config.m_manualSos = (param.get_name() == "manual_sos") ? param.as_double() : this->get_parameter("manual_sos").as_double();
-            
+            sos_config.m_bUsedUserSos = new_use_manual_sos.value_or(this->get_parameter("use_manual_sos").as_bool());
+            sos_config.m_manualSos    = static_cast<float>(new_manual_sos.value_or(this->get_parameter("manual_sos").as_double()));
+
             SequencerApi::Svs5SetConfiguration(SequencerApi::SVS5_CONFIG_SOUND_VELOCITY, sizeof(SequencerApi::SequencerSosConfig), &sos_config, 0);
             RCLCPP_INFO(this->get_logger(), "Live Update: Speed of Sound Configured");
         }
