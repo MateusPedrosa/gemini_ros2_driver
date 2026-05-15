@@ -3,6 +3,7 @@
 #include "Svs5Seq/Svs5SequencerApi.h"
 #include "Gemini/GeminiStructuresPublic.h"
 #include "GenesisSerializer/GlfApi.h"
+#include "GenesisSerializer/GenericDataTypes.h"
 
 #include <vector>
 #include <string>
@@ -16,6 +17,7 @@ GeminiSonarNode::GeminiSonarNode() : Node("gemini_sonar_node") {
     // Initialize your publishers
     image_pub_ = this->create_publisher<sensor_msgs::msg::Image>("sonar/image", 10);
     status_pub_ = this->create_publisher<gemini_ros2::msg::SonarStatus>("sonar/status", 10);
+    imu_pub_ = this->create_publisher<sensor_msgs::msg::Imu>("sonar/imu", 10);
 
     // Declare ROS 2 parameters for environment toggling
     this->declare_parameter<bool>("live_mode", false);
@@ -104,63 +106,57 @@ void GeminiSonarNode::onGeminiMessageReceived(unsigned int msgType, size_t size,
 
         case SequencerApi::GEMINI_STATUS:
         {
-            // First, cast to the base network message to check the source device ID
-            const CGemNetMsg* const pNetMsg = (const CGemNetMsg* const)value;
+            const GLF::GeminiSonarStatusMessage* const statusMsg =
+                (const GLF::GeminiSonarStatusMessage* const)value;
+            const GLF::GeminiStatusRecord& status = statusMsg->m_geminiSonarStatus;
 
             gemini_ros2::msg::SonarStatus status_msg;
             status_msg.header.stamp = this->now();
-            status_msg.source_device = pNetMsg->m_head.m_src_sub_device_id;
+            status_msg.source_device = status.m_deviceID;
 
-            // Helper lambda to decode 12-bit signed MK2 temperatures
-            auto decode_mk2_temp = [](unsigned short raw_temp) -> double {
-                signed short temp = raw_temp & 0x0FFF; 
-                if (raw_temp & 0x0800) {               
-                    temp |= 0xF000;                    
-                }
-                return static_cast<double>(temp) * 0.0625;
-            };
+            status_msg.shutdown_status           = status.m_shutdownStatus;
+            status_msg.over_temperature_shutdown = (status.m_shutdownStatus & 0x0001);
+            status_msg.out_of_water_shutdown     = (status.m_shutdownStatus & 0x0002);
 
-            // Device ID 2 = Beamformer FPGA
-            if (pNetMsg->m_head.m_src_sub_device_id == 2)
+            status_msg.bf_die_temp   = status.m_dieT;
+            status_msg.bf_pcb_temp   = status.m_vgaT1;
+            status_msg.bf_comms_temp = status.m_vgaT2;
+            status_msg.bf_tx_temp    = status.m_txT;
+            status_msg.bf_psu_temp   = status.m_psuT;
+
+            status_msg.da_pcb_temp      = status.m_vgaT3;
+            status_msg.da_afe0_top_temp = status.m_afe0TopTemp;
+            status_msg.da_afe0_bot_temp = status.m_afe0BotTemp;
+            status_msg.da_afe1_top_temp = status.m_afe1TopTemp;
+            status_msg.da_afe1_bot_temp = status.m_afe1BotTemp;
+            status_msg.da_afe2_top_temp = status.m_afe2TopTemp;
+            status_msg.da_afe2_bot_temp = status.m_afe2BotTemp;
+            status_msg.da_afe3_top_temp = status.m_afe3TopTemp;
+            status_msg.da_afe3_bot_temp = status.m_afe3BotTemp;
+
+            status_pub_->publish(status_msg);
+        }
+        break;
+
+        case SequencerApi::COMPASS_RECORD:
+        {
+            GLF::GLogV4ReplyMessage* gnsV4ReplyMsg = (GLF::GLogV4ReplyMessage*)value;
+            uint8_t dataType = gnsV4ReplyMsg->m_header.m_ciHeader.m_dataType;
+            if (dataType == 99)
             {
-                const CGemMk2BFStatusPacket* const pBF = (const CGemMk2BFStatusPacket* const)value;
-                
-                // Ignore status messages with no active connection
-                if( !pBF->m_sonarAltIp ) return;
-
-                status_msg.shutdown_status = pBF->m_shutdownStatus;
-                status_msg.over_temperature_shutdown = (pBF->m_shutdownStatus & 0x0001);
-                status_msg.out_of_water_shutdown     = (pBF->m_shutdownStatus & 0x0002);
-
-                // Die Temp still requires the specific FPGA formula
-                status_msg.bf_die_temp   = ((pBF->m_dieTemp * 503.975) / 1024.0) - 273.15;
-                
-                // Standard MK2 12-bit temperatures
-                status_msg.bf_pcb_temp   = decode_mk2_temp(pBF->m_pcbTemp);
-                status_msg.bf_comms_temp = decode_mk2_temp(pBF->m_commsTemp);
-                status_msg.bf_tx_temp    = decode_mk2_temp(pBF->m_txTemp);
-                status_msg.bf_psu_temp   = decode_mk2_temp(pBF->m_psuTemp);
-
-                status_pub_->publish(status_msg);
+                std::vector<unsigned char>& vecCompass = *gnsV4ReplyMsg->m_v4GenericRec.m_vecData;
+                publishImu(reinterpret_cast<const GLF::CompassDataRecord*>(vecCompass.data()));
             }
-            // Device ID 4 = Data Acquisition FPGA 0
-            else if (pNetMsg->m_head.m_src_sub_device_id == 4)
+            else
             {
-                const CGemMk2DAStatusPacket* const pDA = (const CGemMk2DAStatusPacket* const)value;
-
-                // Standard MK2 12-bit temperatures
-                status_msg.da_pcb_temp      = decode_mk2_temp(pDA->m_pcbTemp);
-                status_msg.da_afe0_top_temp = decode_mk2_temp(pDA->m_afe0TopTemp);
-                status_msg.da_afe0_bot_temp = decode_mk2_temp(pDA->m_afe0BotTemp);
-                status_msg.da_afe1_top_temp = decode_mk2_temp(pDA->m_afe1TopTemp);
-                status_msg.da_afe1_bot_temp = decode_mk2_temp(pDA->m_afe1BotTemp);
-                status_msg.da_afe2_top_temp = decode_mk2_temp(pDA->m_afe2TopTemp);
-                status_msg.da_afe2_bot_temp = decode_mk2_temp(pDA->m_afe2BotTemp);
-                status_msg.da_afe3_top_temp = decode_mk2_temp(pDA->m_afe3TopTemp);
-                status_msg.da_afe3_bot_temp = decode_mk2_temp(pDA->m_afe3BotTemp);
-
-                status_pub_->publish(status_msg);
+                RCLCPP_WARN_ONCE(this->get_logger(), "COMPASS_RECORD: unsupported dataType %d (only structured type 99 is handled)", dataType);
             }
+        }
+        break;
+
+        case SequencerApi::AHRS_HPR_DATA:
+        {
+            publishImu(reinterpret_cast<const GLF::CompassDataRecord*>(value));
         }
         break;
         
@@ -168,6 +164,27 @@ void GeminiSonarNode::onGeminiMessageReceived(unsigned int msgType, size_t size,
             // Handle other messages if necessary
             break;
     }
+}
+
+void GeminiSonarNode::publishImu(const GLF::CompassDataRecord* pRec) {
+    RCLCPP_INFO_ONCE(this->get_logger(), "Publishing IMU data (heading=%.2f pitch=%.2f roll=%.2f)", pRec->m_heading, pRec->m_pitch, pRec->m_roll);
+    auto imu_msg = sensor_msgs::msg::Imu();
+    imu_msg.header.stamp = this->now();
+    imu_msg.header.frame_id = "sonar_link";
+
+    tf2::Quaternion q;
+    q.setRPY(
+        pRec->m_roll    * (M_PI / 180.0),
+        pRec->m_pitch   * (M_PI / 180.0),
+        pRec->m_heading * (M_PI / 180.0)
+    );
+
+    imu_msg.orientation.x = q.x();
+    imu_msg.orientation.y = q.y();
+    imu_msg.orientation.z = q.z();
+    imu_msg.orientation.w = q.w();
+
+    imu_pub_->publish(imu_msg);
 }
 
 // Applies all configurations when the node first boots
