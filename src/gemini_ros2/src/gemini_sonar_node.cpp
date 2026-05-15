@@ -18,7 +18,7 @@ using std::placeholders::_3;
 GeminiSonarNode::GeminiSonarNode() : Node("gemini_sonar_node") {
     // Initialize your publishers
     image_pub_   = this->create_publisher<sensor_msgs::msg::Image>("sonar/image", rclcpp::SensorDataQoS());
-    status_pub_  = this->create_publisher<gemini_ros2::msg::SonarStatus>("sonar/status", rclcpp::SensorDataQoS());
+    status_pub_  = this->create_publisher<gemini_ros2::msg::SonarStatus>("sonar/status", rclcpp::QoS(10));
     imu_pub_     = this->create_publisher<sensor_msgs::msg::Imu>("sonar/imu", rclcpp::SensorDataQoS());
     imu_raw_pub_ = this->create_publisher<sensor_msgs::msg::Imu>("sonar/imu_raw", rclcpp::SensorDataQoS());
     mag_pub_     = this->create_publisher<sensor_msgs::msg::MagneticField>("sonar/mag", rclcpp::SensorDataQoS());
