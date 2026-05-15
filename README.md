@@ -79,7 +79,7 @@ ros2 launch gemini_ros2 gemini_sonar.launch.py live_mode:=True
 | Topic | Type | Description |
 |---|---|---|
 | `/sonar/image` | `sensor_msgs/msg/Image` | 8-bit mono acoustic target imagery (polar sweep). |
-| `/sonar/status` | `gemini_ros2/msg/SonarStatus` | Custom message containing alternating MK2 Beamformer and Data Acquisition telemetry (Die Temps, PCB Temps, Safety Flags). *Live mode only.* |
+| `/sonar/status` | `gemini_ros2/msg/SonarStatus` | Custom message containing MK2 Beamformer and Data Acquisition telemetry (Die Temps, PCB Temps, Safety Flags). |
 | `/sonar/imu` | `sensor_msgs/msg/Imu` | Orientation (Quaternions) derived from `COMPASS_RECORD`. |
 | `/sonar/gps` | `sensor_msgs/msg/NavSatFix` | Coordinates derived from `GPS_RECORD`. |
 | `/sonar/altitude` | `std_msgs/msg/Float64` | Altitude in meters derived from `ALTIMETER_RECORD`. |
