@@ -36,7 +36,7 @@ GeminiSonarNode::GeminiSonarNode() : Node("gemini_sonar_node") {
         std::bind(&GeminiSonarNode::recordCallback, this, std::placeholders::_1, std::placeholders::_2));
 
     // Declare ROS 2 parameters for environment toggling
-    this->declare_parameter<bool>("live_mode", false);
+    this->declare_parameter<bool>("live_mode", true);
     this->declare_parameter<std::string>("log_file_path", "/workspace/build/sim_test/sample.glf");
 
     // Declare all acoustic parameters so the launch file can set them

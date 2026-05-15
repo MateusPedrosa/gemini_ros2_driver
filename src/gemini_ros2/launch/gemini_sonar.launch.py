@@ -10,7 +10,7 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 # Environment Settings
-                'live_mode': False, # Set to True when connected to the physical 1200iK
+                'live_mode': True,
                 'log_file_path': '/workspace/build/sim_test/sample.glf',
 
                 # Core Acoustic Controls
