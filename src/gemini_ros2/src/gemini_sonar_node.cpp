@@ -55,6 +55,8 @@ GeminiSonarNode::GeminiSonarNode() : Node("gemini_sonar_node") {
     this->declare_parameter<bool>("loop_playback", false);
     this->declare_parameter<int>("playback_speed", 1);
     this->declare_parameter<std::string>("record_path", "");
+    this->declare_parameter<std::string>("frame_id", "sonar_link");
+    frame_id_ = this->get_parameter("frame_id").as_string();
 
     // Bind the live parameter listener
     param_callback_handle_ = this->add_on_set_parameters_callback(
@@ -122,7 +124,7 @@ void GeminiSonarNode::onGeminiMessageReceived(unsigned int msgType, size_t size,
 
             auto img_msg = sensor_msgs::msg::Image();
             img_msg.header.stamp    = this->now();
-            img_msg.header.frame_id = "sonar_link";
+            img_msg.header.frame_id = frame_id_;
             img_msg.width    = mi.m_uiEndBearing - mi.m_uiStartBearing;
             img_msg.height   = mi.m_uiEndRange;
             img_msg.encoding = "mono8";
@@ -143,7 +145,7 @@ void GeminiSonarNode::onGeminiMessageReceived(unsigned int msgType, size_t size,
 
             auto img_msg = sensor_msgs::msg::Image();
             img_msg.header.stamp    = this->now();
-            img_msg.header.frame_id = "sonar_link";
+            img_msg.header.frame_id = frame_id_;
             img_msg.width    = mi.m_uiEndBearing - mi.m_uiStartBearing;
             img_msg.height   = mi.m_uiEndRange;
             img_msg.encoding = "mono8";
@@ -162,8 +164,9 @@ void GeminiSonarNode::onGeminiMessageReceived(unsigned int msgType, size_t size,
             const GLF::GeminiStatusRecord& status = statusMsg->m_geminiSonarStatus;
 
             gemini_ros2::msg::SonarStatus status_msg;
-            status_msg.header.stamp = this->now();
-            status_msg.source_device = status.m_deviceID;
+            status_msg.header.stamp    = this->now();
+            status_msg.header.frame_id = frame_id_;
+            status_msg.source_device   = status.m_deviceID;
 
             status_msg.shutdown_status           = status.m_shutdownStatus;
             status_msg.over_temperature_shutdown = (status.m_shutdownStatus & 0x0001);
@@ -225,7 +228,7 @@ void GeminiSonarNode::onGeminiMessageReceived(unsigned int msgType, size_t size,
 
             auto gps_msg = sensor_msgs::msg::NavSatFix();
             gps_msg.header.stamp    = this->now();
-            gps_msg.header.frame_id = "sonar_link";
+            gps_msg.header.frame_id = frame_id_;
             // bits 1 (lat valid) and 2 (lon valid) of m_gpsValid indicate a position fix
             gps_msg.status.status   = ((pGps->m_gpsValid & 0x06) == 0x06)
                                         ? sensor_msgs::msg::NavSatStatus::STATUS_FIX
@@ -245,7 +248,7 @@ void GeminiSonarNode::onGeminiMessageReceived(unsigned int msgType, size_t size,
 
             auto imu_msg = sensor_msgs::msg::Imu();
             imu_msg.header.stamp    = this->now();
-            imu_msg.header.frame_id = "sonar_link";
+            imu_msg.header.frame_id = frame_id_;
             imu_msg.angular_velocity.x    = pRaw->m_gyroX;
             imu_msg.angular_velocity.y    = pRaw->m_gyroY;
             imu_msg.angular_velocity.z    = pRaw->m_gyroZ;
@@ -275,7 +278,7 @@ void GeminiSonarNode::publishImu(const GLF::CompassDataRecord* pRec) {
     RCLCPP_INFO_ONCE(this->get_logger(), "Publishing IMU data (heading=%.2f pitch=%.2f roll=%.2f)", pRec->m_heading, pRec->m_pitch, pRec->m_roll);
     auto imu_msg = sensor_msgs::msg::Imu();
     imu_msg.header.stamp = this->now();
-    imu_msg.header.frame_id = "sonar_link";
+    imu_msg.header.frame_id = frame_id_;
 
     tf2::Quaternion q;
     q.setRPY(

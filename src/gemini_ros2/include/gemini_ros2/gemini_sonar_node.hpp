@@ -38,6 +38,8 @@ private:
     void recordCallback(const std_srvs::srv::SetBool::Request::SharedPtr req,
                         std_srvs::srv::SetBool::Response::SharedPtr res);
 
+    std::string frame_id_;
+
     rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
     rcl_interfaces::msg::SetParametersResult parametersCallback(const std::vector<rclcpp::Parameter> &parameters);
     void applyInitialConfigurations();

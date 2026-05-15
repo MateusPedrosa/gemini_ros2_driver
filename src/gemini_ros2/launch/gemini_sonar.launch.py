@@ -8,6 +8,7 @@ def generate_launch_description():
         DeclareLaunchArgument('live_mode',      default_value='True'),
         DeclareLaunchArgument('log_file_path',  default_value='/workspace/build/sim_test/sample.glf'),
         DeclareLaunchArgument('record_path',    default_value=''),
+        DeclareLaunchArgument('frame_id',       default_value='sonar_link'),
 
         Node(
             package='gemini_ros2',
@@ -19,6 +20,7 @@ def generate_launch_description():
                 'live_mode':      LaunchConfiguration('live_mode'),
                 'log_file_path':  LaunchConfiguration('log_file_path'),
                 'record_path':    LaunchConfiguration('record_path'),
+                'frame_id':       LaunchConfiguration('frame_id'),
 
                 # Core Acoustic Controls
                 'range': 20.0,
